@@ -13,9 +13,10 @@ from discord.ext import commands
 from discord.commands import Option
 import json
 import re
-from sys import stderr
+from sys import stderr, exception
 from os import listdir, getenv
 import dotenv
+from datetime import datetime
 
 # DISCORD_TOKEN is defined in a .env file next to this python script.
 # If you want to run Promotion!! locally, create/edit that file and type DISCORD_TOKEN=YourDiscordBotsTokenHere (no quotation marks!)
@@ -46,8 +47,7 @@ def load_mappings():
                     mappings.update(file)
         return mappings
     except Exception as e:
-        stderr.write("ERROR LOADING MAPPINGS!\n")
-        raise e
+        stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} ERROR LOADING MAPPINGS!\n{e.with_traceback(exception().__traceback__)}\n")
 
 # Store mappings in the aforementioned json files, one for every server.
 def save_mappings():
@@ -56,8 +56,7 @@ def save_mappings():
             with open(f"assignments/{server}.json", "w") as f:
                 json.dump({server: roles}, f, indent=4)
     except Exception as e:
-        stderr.write(f"Error occurred while saving mappings!\n")
-        raise e
+        stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} ERROR SAVING MAPPINGS!\n{e.with_traceback(exception().__traceback__)}\n")
 
 # Instantiate mappings dictionary.
 # Stores all the servers, roles, channels and messages.
@@ -123,6 +122,53 @@ async def view_assignments(ctx: discord.ApplicationContext):
     else:
         await ctx.respond(output, ephemeral=True)
 
+# Buttons for removing assignments.
+class RemoveAssignmentsView(discord.ui.View):
+    # Parameters.
+    def __init__(self, output: str, mapping: dict, assignment: str, func):
+        super().__init__(timeout=300) # Times out after 5 minutes.
+        self.output = output
+        self.mapping = mapping
+        self.assignment = assignment
+        # func will be the helper function that removes the data from the mapping. It will take the other 3 parameters as arguments.
+        self.func = func
+
+    # Add a button for cancelling the operation.
+    @discord.ui.button(label="No, don't do that", row=0, style=discord.ButtonStyle.success)
+    async def cancel_button_callback(self, button, interaction):
+        # Disable the buttons after clicking.
+        self.disable_all_items()
+        await interaction.response.edit_message(view=self)
+        # Fair enough
+        await interaction.followup.send("fair enough", ephemeral=True)
+
+    # Add a button for confirming the operation.
+    @discord.ui.button(label="Yes, I'm sure", row=0, style=discord.ButtonStyle.danger)
+    async def confirm_button_callback(self, button, interaction):
+        # Disable the buttons after click.
+        self.disable_all_items()
+        await interaction.response.edit_message(view=self)
+        # Helper function to remove the assignments.
+        await self.func(interaction = interaction,
+                        mapping = self.mapping,
+                        assignment = self.assignment,
+                        output = self.output)
+
+    async def on_timeout(self):
+        # Disable buttons, log the timeout and notify the user.
+        stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} WARNING: Assignment removal timed out.\n")
+        self.disable_all_items()
+        await self.message.edit(content="Why you ghosting me (Timed out)", view=self)
+
+# Helper function that removes a dictionary from the mapping.
+async def generic_helper(interaction, mapping, assignment, output, *args, **kwargs):
+    try:
+        mapping.pop(assignment)
+        await interaction.followup.send(output, ephemeral=True)
+    except Exception as e:
+        # Error handling. Log to console, then tell the user.
+        stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} ERROR REMOVING ASSIGNMENT:\n{e.with_traceback(exception().__traceback__)}\n")
+        await interaction.followup.send("There was an error removing the assignment!", ephemeral=True)
 
 # Command for removing assignments in a server.
 @bot.slash_command(
@@ -135,9 +181,9 @@ async def remove_role_channel_assignment(ctx: discord.ApplicationContext,
                                          role: Option(discord.Role, "The role it should delete the assignment of.", required=True) = None,
                                          channel: Option(discord.TextChannel, "The channel where it sends messages.", required=False) = None,
                                          message: Option(str, "The message it sends.", required=False) = None):
-    # Instantly give a response so the bot doesn't time out.
-    await ctx.respond(f"**WARNING:** Any assignment you remove is **not recoverable.**", ephemeral=True)
 
+    # Instantly give a response so the bot doesn't time out.
+    # await ctx.respond(f"**WaRNING:** Any assignment you remove is **not recoverable.**", ephemeral=True)
     # Turn parameter IDs to strings. They're normally integers, this is to avoid converting them every time they are used.
     str_guild_id = str(ctx.guild.id)
     if role:
@@ -148,133 +194,90 @@ async def remove_role_channel_assignment(ctx: discord.ApplicationContext,
 
     # Check if the parameters exist.
     parameter_existence = (bool(role), bool(channel), bool(message))
-    # Helper function for popping a dictionary element after reaction confirmation.
-    async def remove_confirmation(confirmation_text: str, output: str, mapping: dict, assignment: str):
+
+    # Helper function that removes a message from the mapping.
+    async def remove_message_helper(interaction, mapping, output, *args, **kwargs):
         try:
-            # Send text, then react with a check and an X emoji.
-            confirmation = await ctx.send(confirmation_text)
-            await confirmation.add_reaction("✅")
-            await confirmation.add_reaction("❌")
-            # Check if the person who ran the command reacted, not just anyone.
-            def check(reaction, user):
-                return user == ctx.author and reaction.message.id == confirmation.id
-            # Check to see when the person who ran the command reacted to the message.
-            reaction, user = await bot.wait_for("reaction_add", check=check)
-            reacted_emoji = str(reaction.emoji)
-            if reacted_emoji == "✅":
-                # If check mark reaction, delete the assignment.
-                mapping.pop(assignment)
-                await ctx.send(output)
-            if reacted_emoji == "❌":
-                await ctx.send("fair enough")
+            # If the message is in the file,
+            if message in mapping:
+                # And the message is the only assignment there,
+                if mapping == [message]:
+                    # Remove the entire channel from the file,
+                    role_channel_mapping[str_guild_id][str_role_id].pop(str_channel_id)
+                # Otherwise remove just the message.
+                else:
+                    mapping.remove(message)
+                await interaction.followup.send(output, ephemeral=True)
+            # If the message isn't in the file, notify the user.
+            else:
+                stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} WARNING REMOVING ASSIGNMENT: Message not in assignment.\n")
+                await interaction.followup.send("Message not in assignment.", ephemeral=True)
         except Exception as e:
             # Error handling. Log to console, then tell the user.
-            stderr.write("ERROR REMOVING ASSIGNMENT\n")
-            await ctx.respond("There was an error removing the assignment!", ephemeral=True)
-            raise e
+            stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} ERROR REMOVING ASSIGNMENT:\n{e.with_traceback(exception().__traceback__)}\n")
+            await interaction.followup.send("There was an error removing the assignment!", ephemeral=True)
 
-    # Do something for when certain parameters exist.
-    match parameter_existence:
-        # No parameters, remove every assignment.
-        case (False, False, False):
-            await remove_confirmation("Are you ***absolutely sure*** that you want to delete ***EVERY*** assignment?\n*This cannot be reversed!*",
-                                      "Deleted every assignment successfully.",
-                                      role_channel_mapping,
-                                      str_guild_id)
-        # Role parameter, remove every assignment of that role.
-        case (True, False, False):
-            await remove_confirmation(f"Are you *sure* you want to delete all the assignments made to the {str_role_name} role?",
-                                      f"Deleted every assignment to the {str_role_name} role successfully.",
-                                      role_channel_mapping[str_guild_id],
-                                      str_role_id)
-        # Role and channel parameters, remove every assignment of that role in that channel.
-        case (True, True, False):
-            await remove_confirmation(f"Are you *sure* you want to delete all the assignments from {str_role_name} in {channel.mention}?",
-                                      f"Deleted every assignment from {str_role_name} in {channel.mention} successfully.",
-                                      role_channel_mapping[str_guild_id][str_role_id],
-                                      str_channel_id)
-        # All parameters, remove a specific assignment.
-        case (True, True, True):
-            # Can't use remove_confirmation because I'm removing a value in an array instead of popping a dictionary entry.
-            try:
-                # If everything is given and the message is in the file, delete it.
-                if message in role_channel_mapping[str_guild_id][str_role_id][str_channel_id]:
-                    # Send a message and react to it.
-                    confirmation = await ctx.send(f"Are you sure you want to remove the following message from {str_role_name} in {channel.mention}?\n{message}")
-                    await confirmation.add_reaction("✅")
-                    await confirmation.add_reaction("❌")
-                    # Check if the person who ran the command reacted, not just anyone.
-                    def check(reaction, user):
-                        return user == ctx.author and reaction.message.id == confirmation.id
-                    # Check to see when the person who ran the command reacted to the message.
-                    reaction, user = await bot.wait_for("reaction_add", check=check)
-                    reacted_emoji = str(reaction.emoji)
-                    # If they reacted with check,
-                    if reacted_emoji == "✅":
-                        # And it's the only message left in the json file,
-                        if role_channel_mapping[str_guild_id][str_role_id][str_channel_id] == [message]:
-                            # Remove the entire channel from the file,
-                            role_channel_mapping[str_guild_id][str_role_id].pop(str_channel_id)
-                        else:
-                            # Otherwise remove just the message.
-                            role_channel_mapping[str_guild_id][str_role_id][str_channel_id].remove(message)
-                        await ctx.send(f'Deleted "{message}" from {str_role_name} in {channel.mention} successfully.')
-                    if reacted_emoji == "❌":
-                        await ctx.send("fair enough")
-                else:
-                    # If the message isn't in the file, notify the user.
-                    stderr.write("WARNING REMOVING ASSIGNMENT: Message not in assignment.\n")
-                    await ctx.send("Message not in assignment.")
-            except Exception as e:
-                stderr.write("ERROR REMOVING ASSIGNMENT\n")
-                await ctx.respond("There was an error removing the assignment!", ephemeral=True)
-                raise e
-        # Only channel parameter, remove all assignments in that channel.
-        case (False, True, False):
-            try:
-                confirmation = await ctx.send(f"Are you sure you want to remove every assignment in {channel.mention}?")
-                await confirmation.add_reaction("✅")
-                await confirmation.add_reaction("❌")
-                # Check if the person who ran the command reacted, not just anyone.
-                def check(reaction, user):
-                    return user == ctx.author and reaction.message.id == confirmation.id
-                reaction, user = await bot.wait_for("reaction_add", check=check)
-                reacted_emoji = str(reaction.emoji)
-                # Check to see when the person who ran the command reacted to the message.
-                if reacted_emoji == "❌":
-                    await ctx.send("fair enough")
-                # If they reacted with check,
-                if reacted_emoji == "✅":
-                    # Initialize check for assignment,
-                    channel_has_assignment = False
-                    # Create a copy of the server's assignments to prevent changing the iterator size,
-                    shadow_mapping = role_channel_mapping[str_guild_id].copy()
-                    # And for every role in that copy,
-                    for selected_role in shadow_mapping:
-                        # If it has an assignment in that channel,
-                        if str_channel_id in role_channel_mapping[str_guild_id][selected_role].keys():
-                            # Set the check to True,
-                            channel_has_assignment = True
-                            # And if it's the only channel left in that assignment,
-                            if list(role_channel_mapping[str_guild_id][selected_role].keys()) == [str_channel_id]:
-                                # Remove the assigned role,
-                                role_channel_mapping[str_guild_id].pop(selected_role)
-                            else:
-                                # Otherwise remove just that assigned channel.
-                                role_channel_mapping[str_guild_id][selected_role].pop(str_channel_id)
-                    # If the channel isn't present in the server's assignments,
-                    if not channel_has_assignment:
-                        # Log and notify the user.
-                        stderr.write("WARNING REMOVING ASSIGNMENT: Channel has no assignments.\n")
-                        await ctx.send("That channel doesn't have any assignments.")
+    # Helper function for removing a channel from the mappings.
+    async def remove_channel_helper(interaction, mapping, output, *args, **kwargs):
+        try:
+            # Initialize check for assignment,
+            channel_has_assignment = False
+            # Create a copy of the server's assignments to prevent changing the iterator size,
+            shadow_mapping = mapping.copy()
+            # And for every role in that copy,
+            for selected_role in shadow_mapping:
+                # If it has an assignment in that channel,
+                if str_channel_id in mapping[selected_role].keys():
+                    # Set the check to True,
+                    channel_has_assignment = True
+                    # And if it's the only channel left in that assignment,
+                    if list(mapping[selected_role].keys()) == [str_channel_id]:
+                        # Remove the assigned role,
+                        mapping.pop(selected_role)
                     else:
-                        # Otherwise confirm deletion.
-                        await ctx.send(f'Deleted every assignment in {channel.mention} successfully.')
-            except Exception as e:
-                stderr.write("ERROR REMOVING ASSIGNMENT\n")
-                await ctx.respond("There was an error removing the assignment!", ephemeral=True)
-                raise e
-        # In every other case, log in terminal and tell the user why it didn't work.
+                        # Otherwise remove just that assigned channel.
+                        mapping[selected_role].pop(str_channel_id)
+            # If the channel isn't present in the server's assignments,
+            if not channel_has_assignment:
+                # Log and notify the user.
+                stderr.write("WARNING REMOVING ASSIGNMENT: Channel has no assignments.\n")
+                await interaction.followup.send("That channel doesn't have any assignments.", ephemeral=True)
+            else:
+                # Otherwise confirm deletion.
+                await interaction.followup.send(output, ephemeral=True)
+        except Exception as e:
+            # Error handling. Log to console, then tell the user.
+            stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} ERROR REMOVING ASSIGNMENT:\n{e.with_traceback(exception().__traceback__)}\n")
+            await interaction.followup.send("There was an error removing the assignment!", ephemeral=True)
+
+    # Do something when certain parameters exist.
+    match parameter_existence:
+        # No given parameters, delete everything.
+        case (False, False, False):
+            await ctx.respond("Are you ***absolutely sure*** that you want to delete ***EVERY*** assignment?\n*This cannot be reversed!*",
+                              view=RemoveAssignmentsView("Deleted every assignment successfully.",
+                                                         role_channel_mapping, str_guild_id, generic_helper), ephemeral=True)
+        # Role param given, remove role assignment.
+        case (True, False, False):
+            await ctx.respond(f"Are you *sure* you want to delete all the assignments made to the {str_role_name} role?",
+                              view=RemoveAssignmentsView(f"Deleted every assignment to the {str_role_name} role successfully.",
+                                                         role_channel_mapping[str_guild_id], str_role_id, generic_helper), ephemeral=True)
+        # Role and channel params given, remove the role assignment from that channel.
+        case (True, True, False):
+            await ctx.respond(f"Are you *sure* you want to delete all the assignments from {str_role_name} in {channel.mention}?",
+                              view=RemoveAssignmentsView(f"Deleted every assignment from {str_role_name} in {channel.mention} successfully.",
+                                                         role_channel_mapping[str_guild_id][str_role_id], "", generic_helper), ephemeral=True)
+        # Every parameter given, remove a specific message.
+        case (True, True, True):
+            await ctx.respond(f"Are you sure you want to remove the following message from {str_role_name} in {channel.mention}?\n{message}",
+                              view=RemoveAssignmentsView(f'Deleted "{message}" from {str_role_name} in {channel.mention} successfully.',
+                                                         role_channel_mapping[str_guild_id][str_role_id][str_channel_id], "", remove_message_helper), ephemeral=True)
+        # Just the channel given, remove every assignment in that channel.
+        case (False, True, False):
+            await ctx.respond(f"Are you sure you want to remove every assignment in {channel.mention}?",
+                              view=RemoveAssignmentsView(f'Deleted every assignment in {channel.mention} successfully.',
+                                                         role_channel_mapping[str_guild_id], "", remove_channel_helper), ephemeral=True)
+        # In every other case, send the berlin wall of text.
         case _:
             stderr.write("WARNING REMOVING ASSIGNMENT: Invalid parameters.\n")
             await ctx.respond("""i can't work with those parameters man
@@ -321,19 +324,20 @@ async def on_member_update(before, after):
     added_roles = [role for role in after.roles if role not in before.roles]
     for role in added_roles:
         # If the role is assigned
-        if str(role.id) in role_channel_mapping[str(after.guild.id)].keys():
+        str_role_id, str_guild_id = str(role.id), str(after.guild.id)
+        if str_role_id in role_channel_mapping[str_guild_id].keys():
             # Save all channel IDs and messages to different lists.
-            channel_ids = role_channel_mapping[str(after.guild.id)][str(role.id)].keys()
-            messages = role_channel_mapping[str(after.guild.id)][str(role.id)].values()
+            channel_ids = role_channel_mapping[str_guild_id][str_role_id].keys()
+            messages = role_channel_mapping[str_guild_id][str_role_id].values()
             for channel in channel_ids:
                 # Get the actual channel from its ID.
                 selected_channel = after.guild.get_channel(int(channel))
                 try:
                     # For every message assigned to that channel assigned to that role,
-                    for message in role_channel_mapping[str(after.guild.id)][str(role.id)][str(channel)]:
+                    for message in role_channel_mapping[str_guild_id][str_role_id][str(channel)]:
                         # Check for all of these tokens,
                         special_tokens = {"{user_mention}": after.mention,
-                                          "{user_tag}": str(after),
+                                          "{user_tag}": after.name,
                                           "{user_name}": after.display_name,
                                           "{user_id}": after.id,
                                           "{role_mention}": role.mention,
@@ -345,9 +349,8 @@ async def on_member_update(before, after):
                         # Then send the new message in the assigned channel.
                         await selected_channel.send(message)
                 except discord.HTTPException as e:
-                    print(f"Failed to send message: {e}")
+                    print(f"Failed to send message: {e.with_traceback(exception().__traceback__)}")
                 except Exception as e:
-                    print(f"An unexpected error occurred: {e}")
-                    raise e
+                    print(f"An unexpected error occurred: {e.with_traceback(exception().__traceback__)}")
 
 bot.run(bot_token)
