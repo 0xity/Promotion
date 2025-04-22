@@ -30,6 +30,9 @@ intents.members = True
 # Create bot object thing and make sure it uses the intents above.
 bot = discord.Bot(intents=intents)
 
+# Initialize global variable for last message to avoid spam.
+last_message = ""
+
 # What it does on startup.
 @bot.event
 async def on_ready():
@@ -347,6 +350,7 @@ Only **channel** parameter to remove every assignment made in that channel.""", 
 # Fun part. What it does when a server member gets a role.
 @bot.event
 async def on_member_update(before, after):
+    global last_message
     # Save all the roles that were added to a user in this list.
     added_roles = [role for role in after.roles if role not in before.roles]
     if added_roles and str(after.guild.id) in role_channel_mapping.keys():
@@ -358,7 +362,6 @@ async def on_member_update(before, after):
                 stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} -- {str(role)} has assignment in {bot.get_guild(after.guild.id).name}.\n")
                 # Save all channel IDs and messages to different lists.
                 channel_ids = role_channel_mapping[str_guild_id][str_role_id].keys()
-                messages = role_channel_mapping[str_guild_id][str_role_id].values()
                 for channel in channel_ids:
                     # Get the actual channel from its ID.
                     selected_channel = after.guild.get_channel(int(channel))
@@ -377,8 +380,11 @@ async def on_member_update(before, after):
                             for x in special_tokens.keys():
                                 # And replace them with the appropriate things,
                                 message = re.sub(x, str(special_tokens[x]), message)
-                            # Then send the new message in the assigned channel.
-                            await selected_channel.send(message)
+                            if message == last_message:
+                                stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} -- Repeat message for {after.name} skipped.\n")
+                            else:
+                                last_message = message
+                                await selected_channel.send(message)
                     except discord.HTTPException as e:
                         stderr.write(f"{datetime.now().strftime('%H:%M:%S:%f')} -- ERROR SENDING MESSAGE:\n\n{e.with_traceback(exception().__traceback__)}\n\n")
                     except Exception as e:
